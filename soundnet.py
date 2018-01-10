@@ -1,5 +1,5 @@
-from keras.layers import BatchNormalization, Activation, Conv1D, MaxPooling1D, ZeroPadding1D, InputLayer
-from keras.models import Sequential
+from keras.layers import BatchNormalization, Activation, Conv1D, MaxPooling1D, ZeroPadding1D, Input
+from keras.models import Model
 import numpy as np
 import librosa
 
@@ -24,8 +24,6 @@ def build_model():
     :return:
     """
     model_weights = np.load('models/sound8.npy').item()
-    model = Sequential()
-    model.add(InputLayer(batch_input_shape=(1, None, 1)))
 
     filter_parameters = [{'name': 'conv1', 'num_filters': 16, 'padding': 32,
                           'kernel_size': 64, 'conv_strides': 2,
@@ -51,44 +49,60 @@ def build_model():
                          {'name': 'conv7', 'num_filters': 1024, 'padding': 2,
                           'kernel_size': 4, 'conv_strides': 2},
 
+                        {'name': 'conv8', 'num_filters': 1000, 'padding': 0,
+                            'kernel_size': 8, 'conv_strides': 2},
+
                          {'name': 'conv8_2', 'num_filters': 401, 'padding': 0,
                           'kernel_size': 8, 'conv_strides': 2},
                          ]
 
-    for x in filter_parameters:
-        model.add(ZeroPadding1D(padding=x['padding']))
-        model.add(Conv1D(x['num_filters'],
-                         kernel_size=x['kernel_size'],
-                         strides=x['conv_strides'],
-                         padding='valid'))
-        weights = model_weights[x['name']]['weights'].reshape(model.layers[-1].get_weights()[0].shape)
-        biases = model_weights[x['name']]['biases']
+    inputs = Input(shape=(None, 1)) # define inputs
 
-        model.layers[-1].set_weights([weights, biases])
+    x = inputs
+    for layer in filter_parameters:
+        if 'conv8' not in layer['name']:
+            x = ZeroPadding1D(padding=layer['padding'])(x)
+        else:
+            x = ZeroPadding1D(padding=layer['padding'])(conv7_layer_output)
 
-        if 'conv8' not in x['name']:
-            gamma = model_weights[x['name']]['gamma']
-            beta = model_weights[x['name']]['beta']
-            mean = model_weights[x['name']]['mean']
-            var = model_weights[x['name']]['var']
+        conv_layer = Conv1D(layer['num_filters'],
+                        kernel_size=layer['kernel_size'],
+                        strides=layer['conv_strides'],
+                        padding='valid', name=layer['name'])
 
+        weights = model_weights[layer['name']]['weights'].reshape(conv_layer.get_weights()[0].shape)
+        biases = model_weights[layer['name']]['biases']
+        conv_layer.set_weights([weights, biases])
 
-            model.add(BatchNormalization())
-            model.layers[-1].set_weights([gamma, beta, mean, var])
-            model.add(Activation('relu'))
-        if 'pool_size' in x:
-            model.add(MaxPooling1D(pool_size=x['pool_size'],
-                                   strides=x['pool_strides'],
-                                   padding='valid'))
+        x = conv_layer(x)
 
+        if 'conv8' not in layer['name']: # except the last layers
+            gamma = model_weights[layer['name']]['gamma']
+            beta = model_weights[layer['name']]['beta']
+            mean = model_weights[layer['name']]['mean']
+            var = model_weights[layer['name']]['var']
+
+            batch_norm = BatchNormalization()
+            batch_norm.set_weights([gamma, beta, mean, var])
+            x = batch_norm(x)
+            x = Activation('relu')(x)
+        if 'pool_size' in layer:
+            x = MaxPooling1D(pool_size=layer['pool_size'],
+                                   strides=layer['pool_strides'],
+                                   padding='valid')(x)
+        if layer['name'] == 'conv7':
+            conv7_layer_output = x
+        elif layer['name'] == 'conv8':
+            imagenet_output = x
+        elif layer['name'] == 'conv8_2':
+            places_output = x
+
+    model = Model(inputs=inputs,outputs=[imagenet_output, places_output])
     return model
 
-
-def predict_scene_from_audio_file(audio_file):
-    model = build_model()
+def predict_from_audio_file(model, audio_file):
     audio = load_audio(audio_file)
     return model.predict(audio)
-
 
 def predictions_to_scenes(prediction):
     scenes = []
@@ -98,8 +112,19 @@ def predictions_to_scenes(prediction):
             scenes.append(categories[np.argmax(prediction[0, p, :])])
     return scenes
 
+def predictions_to_object(prediction):
+    scenes = []
+    with open('categories/categories_imagenet_1000.txt', 'r') as f:
+        categories = f.read().split('\n')
+        for p in range(prediction.shape[1]):
+            scenes.append(categories[np.argmax(prediction[0, p, :])])
+    return scenes
 
 if __name__ == '__main__':
     #  SoundNet demonstration
-    prediction = predict_scene_from_audio_file('railroad_audio.wav')
-    print predictions_to_scenes(prediction)
+    model = build_model()
+    model.summary()
+
+    prediction = predict_from_audio_file(model, 'railroad_audio.wav')
+    print "imagenet:", predictions_to_object(prediction[0])
+    print "places:", predictions_to_scenes(prediction[1])
